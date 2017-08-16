@@ -9,12 +9,14 @@ from six.moves import xrange
 import tensorflow as tf
 from tensorflow.python.platform import app
 from tensorflow.python.platform import flags
+import logging
 
 from cleverhans.attacks import SaliencyMapMethod
-from cleverhans.utils import other_classes, cnn_model
+from cleverhans.utils import other_classes, set_log_level
 from cleverhans.utils import pair_visual, grid_visual, AccuracyReport
 from cleverhans.utils_mnist import data_mnist
 from cleverhans.utils_tf import model_train, model_eval, model_argmax
+from cleverhans.utils_keras import KerasModelWrapper, cnn_model
 
 FLAGS = flags.FLAGS
 
@@ -62,6 +64,8 @@ def mnist_tutorial_jsma(train_start=0, train_end=60000, test_start=0,
     keras.backend.set_session(sess)
     print("Created TensorFlow session and set Keras backend.")
 
+    set_log_level(logging.DEBUG)
+
     # Get MNIST test data
     X_train, Y_train, X_test, Y_test = data_mnist(train_start=train_start,
                                                   train_end=train_end,
@@ -87,6 +91,7 @@ def mnist_tutorial_jsma(train_start=0, train_end=60000, test_start=0,
         'batch_size': batch_size,
         'learning_rate': learning_rate
     }
+    sess.run(tf.global_variables_initializer())
     model_train(sess, x, y, preds, X_train, Y_train, args=train_params)
 
     # Evaluate the accuracy of the MNIST model on legitimate test examples
@@ -99,8 +104,8 @@ def mnist_tutorial_jsma(train_start=0, train_end=60000, test_start=0,
     ###########################################################################
     # Craft adversarial examples using the Jacobian-based saliency map approach
     ###########################################################################
-    print('Crafting ' + str(source_samples) + ' * ' + str(nb_classes-1)
-          + ' adversarial examples')
+    print('Crafting ' + str(source_samples) + ' * ' + str(nb_classes-1) +
+          ' adversarial examples')
 
     # Keep track of success (adversarial example classified in target)
     results = np.zeros((nb_classes, source_samples), dtype='i')
@@ -113,11 +118,11 @@ def mnist_tutorial_jsma(train_start=0, train_end=60000, test_start=0,
     grid_viz_data = np.zeros(grid_shape, dtype='f')
 
     # Instantiate a SaliencyMapMethod attack object
-    jsma = SaliencyMapMethod(model, back='tf', sess=sess)
+    wrap = KerasModelWrapper(model)
+    jsma = SaliencyMapMethod(wrap, back='tf', sess=sess)
     jsma_params = {'theta': 1., 'gamma': 0.1,
-                   'nb_classes': nb_classes, 'clip_min': 0.,
-                   'clip_max': 1., 'targets': y,
-                   'y_val': None}
+                   'clip_min': 0., 'clip_max': 1.,
+                   'y_target': None}
 
     figure = None
     # Loop over the samples we want to perturb into adversarial examples
@@ -142,7 +147,7 @@ def mnist_tutorial_jsma(train_start=0, train_end=60000, test_start=0,
             # This call runs the Jacobian-based saliency map approach
             one_hot_target = np.zeros((1, nb_classes), dtype=np.float32)
             one_hot_target[0, target] = 1
-            jsma_params['y_val'] = one_hot_target
+            jsma_params['y_target'] = one_hot_target
             adv_x = jsma.generate_np(sample, **jsma_params)
 
             # Check if success was achieved

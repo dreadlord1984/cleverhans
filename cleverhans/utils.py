@@ -4,8 +4,14 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import numpy as np
-import warnings
+from collections import OrderedDict
 from six.moves import xrange
+import warnings
+import logging
+
+known_number_types = (int, float, np.float16, np.float32, np.float64,
+                      np.int8, np.int16, np.int32, np.int32, np.int64,
+                      np.uint8, np.uint16, np.uint32, np.uint64)
 
 
 class _ArgsWrapper(object):
@@ -37,6 +43,12 @@ class AccuracyReport(object):
         self.adv_train_clean_eval = 0.
         self.adv_train_adv_eval = 0.
 
+        # Training data accuracy results to be used by tutorials
+        self.train_clean_train_clean_eval = 0.
+        self.train_clean_train_adv_eval = 0.
+        self.train_adv_train_clean_eval = 0.
+        self.train_adv_train_adv_eval = 0.
+
 
 def batch_indices(batch_nb, data_length, batch_size):
     """
@@ -62,11 +74,14 @@ def batch_indices(batch_nb, data_length, batch_size):
 
 def other_classes(nb_classes, class_ind):
     """
-    Heper function that returns a list of class indices without one class
-    :param nb_classes: number of classes in total
+    Returns a list of class indices excluding the class indexed by class_ind
+    :param nb_classes: number of classes in the task
     :param class_ind: the class index to be omitted
-    :return: list of class indices without one class
+    :return: list of class indices excluding the class indexed by class_ind
     """
+    if class_ind < 0 or class_ind >= nb_classes:
+        error_str = "class_ind must be within the range (0, nb_classes - 1)"
+        raise ValueError(error_str)
 
     other_classes_list = list(range(nb_classes))
     other_classes_list.remove(class_ind)
@@ -74,24 +89,62 @@ def other_classes(nb_classes, class_ind):
     return other_classes_list
 
 
+def to_categorical(y, num_classes=None):
+    """
+    Converts a class vector (integers) to binary class matrix.
+    This is adapted from the Keras function with the same name.
+    :param y: class vector to be converted into a matrix
+              (integers from 0 to num_classes).
+    :param num_classes: num_classes: total number of classes.
+    :return: A binary matrix representation of the input.
+    """
+    y = np.array(y, dtype='int').ravel()
+    if not num_classes:
+        num_classes = np.max(y) + 1
+    n = y.shape[0]
+    categorical = np.zeros((n, num_classes))
+    categorical[np.arange(n), y] = 1
+    return categorical
+
+
 def random_targets(gt, nb_classes):
     """
-    Take in the correct labels for each sample and randomly choose target
-    labels from the others
-    :param gt: the correct labels
-    :param nb_classes: The number of classes for this model
+    Take in an array of correct labels and randomly select a different label
+    for each label in the array. This is typically used to randomly select a
+    target class in targeted adversarial examples attacks (i.e., when the
+    search algorithm takes in both a source class and target class to compute
+    the adversarial example).
+    :param gt: the ground truth (correct) labels. They can be provided as a
+               1D vector or 2D array of one-hot encoded labels.
+    :param nb_classes: The number of classes for this task. The random class
+                       will be chosen between 0 and nb_classes such that it
+                       is different from the correct class.
     :return: A numpy array holding the randomly-selected target classes
+             encoded as one-hot labels.
     """
-    if len(gt.shape) > 1:
+    # If the ground truth labels are encoded as one-hot, convert to labels.
+    if len(gt.shape) == 2:
         gt = np.argmax(gt, axis=1)
 
-    result = np.zeros(gt.shape)
+    # This vector will hold the randomly selected labels.
+    result = np.zeros(gt.shape, dtype=np.int32)
 
     for class_ind in xrange(nb_classes):
+        # Compute all indices in that class.
         in_cl = gt == class_ind
-        result[in_cl] = np.random.choice(other_classes(nb_classes, class_ind))
+        size = np.sum(in_cl)
 
-    return np_utils.to_categorical(np.asarray(result), nb_classes)
+        # Compute the set of potential targets for this class.
+        potential_targets = other_classes(nb_classes, class_ind)
+
+        # Draw with replacement random targets among the potential targets.
+        result[in_cl] = np.random.choice(potential_targets, size=size)
+
+    # Encode vector of random labels as one-hot labels.
+    result = to_categorical(result, nb_classes)
+    result = result.astype(np.int32)
+
+    return result
 
 
 def pair_visual(original, adversarial, figure=None):
@@ -154,7 +207,7 @@ def grid_visual(data):
     current_row = 0
     for y in xrange(num_rows):
         for x in xrange(num_cols):
-            figure.add_subplot(num_cols, num_rows, (x + 1) + (y * num_rows))
+            figure.add_subplot(num_rows, num_cols, (x + 1) + (y * num_cols))
             plt.axis('off')
 
             if num_channels == 1:
@@ -179,3 +232,41 @@ def cnn_model(*args, **kwargs):
     warnings.warn("utils.cnn_model is deprecated and may be removed on or"
                   " after 2018-01-05. Switch to utils_keras.cnn_model.")
     return cnn_model(*args, **kwargs)
+
+
+def set_log_level(level, name="cleverhans"):
+    """
+    Sets the threshold for the cleverhans logger to level
+    :param level: the logger threshold. You can find values here:
+                  https://docs.python.org/2/library/logging.html#levels
+    :param name: the name used for the cleverhans logger
+    """
+    logging.getLogger(name).setLevel(level)
+
+
+def create_logger(name):
+    """
+    Create a logger object with the given name.
+
+    If this is the first time that we call this method, then initialize the
+    formatter.
+    """
+    base = logging.getLogger("cleverhans")
+    if len(base.handlers) == 0:
+        ch = logging.StreamHandler()
+        formatter = logging.Formatter('[%(levelname)s %(asctime)s %(name)s] ' +
+                                      '%(message)s')
+        ch.setFormatter(formatter)
+        base.addHandler(ch)
+
+    return base
+
+
+def deterministic_dict(normal_dict):
+    """
+    Returns a version of `normal_dict` whose iteration order is always the same
+    """
+    out = OrderedDict()
+    for key in sorted(normal_dict.keys()):
+        out[key] = normal_dict[key]
+    return out

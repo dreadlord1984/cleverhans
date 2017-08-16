@@ -13,12 +13,15 @@ import tensorflow.contrib.slim as slim
 from tensorflow.python.ops.losses.util import add_loss
 import time
 import warnings
+import logging
 
-from .utils import batch_indices, _ArgsWrapper
+from .utils import batch_indices, _ArgsWrapper, create_logger, set_log_level
 
 from tensorflow.python.platform import flags
 
 FLAGS = flags.FLAGS
+
+_logger = create_logger("cleverhans.utils.tf")
 
 
 class _FlagsWrapper(_ArgsWrapper):
@@ -132,6 +135,12 @@ def model_train(sess, x, y, predictions, X_train, Y_train, save=False,
         assert args.train_dir, "Directory for save was not given in args dict"
         assert args.filename, "Filename for save was not given in args dict"
 
+    if not verbose:
+        set_log_level(logging.WARNING)
+        warnings.warn("verbose argument is deprecated and will be removed"
+                      " on 2018-02-11. Instead, use utils.set_log_level()."
+                      "For backward compatibility, log_level was set to 30.")
+
     # Define loss
     loss = model_loss(y, predictions)
     if predictions_adv is not None:
@@ -152,9 +161,6 @@ def model_train(sess, x, y, predictions, X_train, Y_train, save=False,
             sess.run(tf.initialize_all_variables())
 
         for epoch in six.moves.xrange(args.nb_epochs):
-            if verbose:
-                print("Epoch " + str(epoch))
-
             # Compute number of batches
             nb_batches = int(math.ceil(float(len(X_train)) / args.batch_size))
             assert nb_batches * args.batch_size >= len(X_train)
@@ -174,8 +180,8 @@ def model_train(sess, x, y, predictions, X_train, Y_train, save=False,
             assert end >= len(X_train)  # Check that all examples were used
             cur = time.time()
             if verbose:
-                print("\tEpoch took " + str(cur - prev) + " seconds")
-            prev = cur
+                _logger.info("Epoch " + str(epoch) + " took " +
+                             str(cur - prev) + " seconds")
             if evaluate is not None:
                 evaluate()
 
@@ -183,9 +189,10 @@ def model_train(sess, x, y, predictions, X_train, Y_train, save=False,
             save_path = os.path.join(args.train_dir, args.filename)
             saver = tf.train.Saver()
             saver.save(sess, save_path)
-            print("Completed model training and saved at: " + str(save_path))
+            _logger.info("Completed model training and saved at: " +
+                         str(save_path))
         else:
-            print("Completed model training.")
+            _logger.info("Completed model training.")
 
     return True
 
@@ -196,13 +203,14 @@ def tf_model_eval(*args, **kwargs):
     return model_eval(*args, **kwargs)
 
 
-def model_eval(sess, x, y, model, X_test, Y_test, feed=None, args=None):
+def model_eval(sess, x, y, predictions=None, X_test=None, Y_test=None,
+               feed=None, args=None, model=None):
     """
     Compute the accuracy of a TF model on some data
     :param sess: TF session to use when training the graph
     :param x: input placeholder
     :param y: output placeholder (for labels)
-    :param model: model output predictions
+    :param predictions: model output predictions
     :param X_test: numpy array with training inputs
     :param Y_test: numpy array with training outputs
     :param feed: An optional dictionary that is appended to the feeding
@@ -210,19 +218,37 @@ def model_eval(sess, x, y, model, X_test, Y_test, feed=None, args=None):
              the learning phase of a Keras model for instance.
     :param args: dict or argparse `Namespace` object.
                  Should contain `batch_size`
+    :param model: (deprecated) if not None, holds model output predictions
     :return: a float with the accuracy value
     """
     args = _FlagsWrapper(args or {})
 
     assert args.batch_size, "Batch size was not given in args dict"
+    if X_test is None or Y_test is None:
+        raise ValueError("X_test argument and Y_test argument "
+                         "must be supplied.")
+    if model is None and predictions is None:
+        raise ValueError("One of model argument "
+                         "or predictions argument must be supplied.")
+    if model is not None:
+        warnings.warn("model argument is deprecated. "
+                      "Switch to predictions argument. "
+                      "model argument will be removed after 2018-01-05.")
+        if predictions is None:
+            predictions = model
+        else:
+            raise ValueError("Exactly one of model argument"
+                             " and predictions argument should be specified.")
 
     # Define accuracy symbolically
     if LooseVersion(tf.__version__) >= LooseVersion('1.0.0'):
         correct_preds = tf.equal(tf.argmax(y, axis=-1),
-                                 tf.argmax(model, axis=-1))
+                                 tf.argmax(predictions, axis=-1))
     else:
         correct_preds = tf.equal(tf.argmax(y, axis=tf.rank(y) - 1),
-                                 tf.argmax(model, axis=tf.rank(model) - 1))
+                                 tf.argmax(predictions,
+                                           axis=tf.rank(predictions) - 1))
+
     acc_value = tf.reduce_mean(tf.to_float(correct_preds))
 
     # Init result var
@@ -235,7 +261,7 @@ def model_eval(sess, x, y, model, X_test, Y_test, feed=None, args=None):
 
         for batch in range(nb_batches):
             if batch % 100 == 0 and batch > 0:
-                print("Batch " + str(batch))
+                _logger.debug("Batch " + str(batch))
 
             # Must not use the `batch_indices` function here, because it
             # repeats some examples.
@@ -261,18 +287,19 @@ def model_eval(sess, x, y, model, X_test, Y_test, feed=None, args=None):
     return accuracy
 
 
-def tf_model_load(sess):
+def tf_model_load(sess, file_path=None):
     """
 
-    :param sess:
-    :param x:
-    :param y:
-    :param model:
+    :param sess: the session object to restore
+    :param file_path: path to the restored session, if None is
+                      taken from FLAGS.train_dir and FLAGS.filename
     :return:
     """
     with sess.as_default():
         saver = tf.train.Saver()
-        saver.restore(sess, os.path.join(FLAGS.train_dir, FLAGS.filename))
+        if file_path is None:
+            file_path = os.path.join(FLAGS.train_dir, FLAGS.filename)
+        saver.restore(sess, file_path)
 
     return True
 
@@ -309,7 +336,7 @@ def batch_eval(sess, tf_inputs, tf_outputs, numpy_inputs, feed=None,
         for start in six.moves.xrange(0, m, args.batch_size):
             batch = start // args.batch_size
             if batch % 100 == 0 and batch > 0:
-                print("Batch " + str(batch))
+                _logger.debug("Batch " + str(batch))
 
             # Compute batch start and end indices
             start = batch * args.batch_size
@@ -376,15 +403,15 @@ def l2_batch_normalize(x, epsilon=1e-12, scope=None):
         return tf.reshape(x_norm, x_shape, scope)
 
 
-def kl_with_logits(q_logits, p_logits, scope=None,
+def kl_with_logits(p_logits, q_logits, scope=None,
                    loss_collection=tf.GraphKeys.REGULARIZATION_LOSSES):
-    """Helper function to compute kl-divergence KL(q || p)
+    """Helper function to compute kl-divergence KL(p || q)
     """
     with tf.name_scope(scope, "kl_divergence") as name:
-        q = tf.nn.softmax(q_logits)
-        q_log = tf.nn.log_softmax(q_logits)
+        p = tf.nn.softmax(p_logits)
         p_log = tf.nn.log_softmax(p_logits)
-        loss = tf.reduce_mean(tf.reduce_sum(q * (q_log - p_log), axis=1),
+        q_log = tf.nn.log_softmax(q_logits)
+        loss = tf.reduce_mean(tf.reduce_sum(p * (p_log - q_log), axis=1),
                               name=name)
         add_loss(loss, loss_collection)
         return loss
